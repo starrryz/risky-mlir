@@ -74,16 +74,18 @@ struct SanitizeTritonLinalgPass
 
     for (linalg::GenericOp genericOp : genericOps) {
       // --- Collect new `ins` operands ---
+      // 泛化：如果某个 generic 不匹配 to_tensor→alloc→copy 模式，
+      //       跳过该 generic 而非 signalPassFailure。
       SmallVector<Value> newIns;
-      bool failed = false;
+      bool patternMatched = true;
       for (Value input : genericOp.getInputs()) {
         auto toTensor =
             input.getDefiningOp<bufferization::ToTensorOp>();
-        if (!toTensor) { failed = true; break; }
+        if (!toTensor) { patternMatched = false; break; }
 
         Value allocVal = toTensor->getOperand(0);
         auto allocOp = allocVal.getDefiningOp<memref::AllocOp>();
-        if (!allocOp) { failed = true; break; }
+        if (!allocOp) { patternMatched = false; break; }
 
         // Find the memref.copy whose target is this alloc.
         Value reinterpretSrc;
@@ -95,14 +97,14 @@ struct SanitizeTritonLinalgPass
             }
           }
         }
-        if (!reinterpretSrc) { failed = true; break; }
+        if (!reinterpretSrc) { patternMatched = false; break; }
         newIns.push_back(reinterpretSrc);
       }
-      if (failed) { signalPassFailure(); return; }
+      if (!patternMatched) continue; // 跳过不匹配的 generic
 
       // --- Collect new `outs` operands ---
       SmallVector<Value> newOuts;
-      if (genericOp.getNumResults() == 0) { signalPassFailure(); return; }
+      if (genericOp.getNumResults() == 0) continue; // 已经是 memref 语义，跳过
 
       Value tensorResult = genericOp.getResult(0);
       bufferization::MaterializeInDestinationOp matOp = nullptr;
@@ -110,7 +112,7 @@ struct SanitizeTritonLinalgPass
         matOp = dyn_cast<bufferization::MaterializeInDestinationOp>(user);
         if (matOp) break;
       }
-      if (!matOp) { signalPassFailure(); return; }
+      if (!matOp) continue; // 没有 materialize，跳过
       newOuts.push_back(matOp.getDest());
 
       // --- Build the replacement linalg.generic (MemRef, void) ---
@@ -154,11 +156,18 @@ struct SanitizeTritonLinalgPass
     });
 
     // Erase in reverse program order (bottom-up).
+    // 泛化：只清理结果无 use 的 op，保留仍被引用的 op。
     for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
       Operation *op = *it;
-      for (Value result : op->getResults())
-        result.dropAllUses();
-      op->erase();
+      bool allResultsUnused = true;
+      for (Value result : op->getResults()) {
+        if (!result.use_empty()) {
+          allResultsUnused = false;
+          break;
+        }
+      }
+      if (allResultsUnused)
+        op->erase();
     }
 
     // ================================================================

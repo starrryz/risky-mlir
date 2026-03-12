@@ -76,8 +76,25 @@ struct FinalizeSPIRVPass
     //   删除 gpu.kernel 空壳函数，将真正的 FuncOp 重命名为 "vecadd"。
     // ================================================================
 
-    // 2a: 重命名 spirv.module
-    spvModule.setSymName("vecadd");
+    // 2a: 重命名 spirv.module（动态：取第一个 spirv::FuncOp 的名字）
+    //     先扫描找到真正的函数名，用于 module 命名
+    std::string kernelName;
+    for (auto func : spvModule.getOps<spirv::FuncOp>()) {
+      if (!func->hasAttr("gpu.kernel")) {
+        kernelName = func.getSymName().str();
+        break;
+      }
+    }
+    if (kernelName.empty()) {
+      // fallback: 取任意 FuncOp 的名字
+      for (auto func : spvModule.getOps<spirv::FuncOp>()) {
+        kernelName = func.getSymName().str();
+        break;
+      }
+    }
+    if (kernelName.empty())
+      kernelName = "kernel";
+    spvModule.setSymName(kernelName);
 
     // 2b: 设置 VCE triple
     auto vceAttr = spirv::VerCapExtAttr::get(
