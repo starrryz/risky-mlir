@@ -15,4 +15,6 @@ target_link_libraries(risky-opt
   MLIRBufferizationDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRGPUDialect
+  MLIRSPIRVDialect
 )

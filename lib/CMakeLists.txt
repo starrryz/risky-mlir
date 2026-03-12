@@ -13,4 +13,7 @@ add_mlir_library(RiskyPasses
   MLIRBufferizationDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRGPUDialect
+  MLIRSPIRVDialect
+  MLIRParser
 )
