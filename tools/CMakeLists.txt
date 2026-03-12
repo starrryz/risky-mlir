@@ -6,6 +6,8 @@ target_link_libraries(risky-opt
   PRIVATE
   RiskyPasses
   MLIROptLib
+  MLIRRegisterAllPasses
+  MLIRRegisterAllDialects
   MLIRIR
   MLIRPass
   MLIRSupport
@@ -17,4 +19,20 @@ target_link_libraries(risky-opt
   MLIRArithDialect
   MLIRGPUDialect
   MLIRSPIRVDialect
+
+  # Pipeline upstream pass libraries
+  MLIRTransforms
+  MLIRLinalgTransforms
+  MLIRSCFDialect
+  MLIRSCFTransforms
+  MLIRGPUTransforms
+  MLIRGPUToSPIRV
+  MLIRSPIRVConversion
+  MLIRSPIRVTransforms
+  MLIRMemRefToSPIRV
+  MLIRArithToSPIRV
+  MLIRFuncToSPIRV
+  MLIRReconcileUnrealizedCasts
+  MLIRAffineDialect
+  MLIRAffineToStandard
 )

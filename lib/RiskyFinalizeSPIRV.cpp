@@ -108,23 +108,55 @@ struct FinalizeSPIRVPass
 
     // ================================================================
     // 阶段 3：链接全局 ID (Link GlobalInvocationId)
-    //   寻找名为 "__builtin__GlobalInvocationId__" 的 GlobalVariableOp，
-    //   记录其 Symbol 名字。
+    //   convert-gpu-to-spirv 生成的是 LocalInvocationId（因为 gpu.thread_id
+    //   映射到 local），但 Vortex OpenCL 需要 GlobalInvocationId。
+    //   先查找 GlobalInvocationId；如果没有，则查找 LocalInvocationId 并
+    //   将其重命名为 GlobalInvocationId。
     // ================================================================
     StringRef globalVarName;
+    spirv::GlobalVariableOp targetGlobalVar = nullptr;
 
+    // 先尝试找 GlobalInvocationId
     for (auto globalVar : spvModule.getOps<spirv::GlobalVariableOp>()) {
       if (globalVar.getSymName() == "__builtin__GlobalInvocationId__") {
-        globalVarName = globalVar.getSymName();
+        targetGlobalVar = globalVar;
         break;
       }
     }
 
-    if (globalVarName.empty()) {
+    // 如果没有，找 LocalInvocationId 并替换
+    if (!targetGlobalVar) {
+      for (auto globalVar : spvModule.getOps<spirv::GlobalVariableOp>()) {
+        if (globalVar.getSymName() == "__builtin__LocalInvocationId__") {
+          targetGlobalVar = globalVar;
+          break;
+        }
+      }
+      if (targetGlobalVar) {
+        // 重命名 GlobalVariable: Local → Global
+        StringRef oldName = "__builtin__LocalInvocationId__";
+        StringRef newName = "__builtin__GlobalInvocationId__";
+        targetGlobalVar.setSymName(newName);
+        targetGlobalVar->setAttr("built_in",
+            StringAttr::get(ctx, "GlobalInvocationId"));
+
+        // 更新所有 spirv.mlir.addressof 引用
+        spvModule.walk([&](spirv::AddressOfOp addrOf) {
+          if (addrOf.getVariable() == oldName) {
+            addrOf->setAttr("variable",
+                FlatSymbolRefAttr::get(ctx, newName));
+          }
+        });
+      }
+    }
+
+    if (!targetGlobalVar) {
       spvModule.emitError("RiskyFinalizeSPIRV: could not find "
-                          "@__builtin__GlobalInvocationId__ global variable");
+                          "@__builtin__GlobalInvocationId__ or "
+                          "@__builtin__LocalInvocationId__ global variable");
       return signalPassFailure();
     }
+    globalVarName = targetGlobalVar.getSymName();
 
     // ================================================================
     // 阶段 4：注入入口点 (Inject EntryPoint & ExecutionMode)
@@ -153,6 +185,14 @@ struct FinalizeSPIRVPass
         funcName,
         spirv::ExecutionMode::ContractionOff,
         ArrayAttr::get(ctx, {}));
+
+    // ================================================================
+    // 阶段 5：清理外层 ModuleOp 属性
+    //   移除 gpu.container_module 和 spirv.target_env，
+    //   使输出更干净，便于后续 mlir-translate 序列化。
+    // ================================================================
+    moduleOp->removeAttr("gpu.container_module");
+    moduleOp->removeAttr("spirv.target_env");
   }
 };
 
