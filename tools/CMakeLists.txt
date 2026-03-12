@@ -1,0 +1,18 @@
+add_llvm_executable(risky-opt
+  risky-opt.cpp
+)
+
+target_link_libraries(risky-opt
+  PRIVATE
+  RiskyPasses
+  MLIROptLib
+  MLIRIR
+  MLIRPass
+  MLIRSupport
+  MLIRParser
+  MLIRFuncDialect
+  MLIRLinalgDialect
+  MLIRBufferizationDialect
+  MLIRMemRefDialect
+  MLIRArithDialect
+)
