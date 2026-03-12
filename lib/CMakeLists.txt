@@ -1,5 +1,6 @@
 add_mlir_library(RiskyPasses
   RiskySetupSPIRVABI.cpp
+  RiskyFinalizeSPIRV.cpp
   RiskySanitizeTritonLinalg.cpp
 
   DEPENDS

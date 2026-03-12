@@ -161,6 +161,7 @@ std::unique_ptr<OperationPass<ModuleOp>> createSetupSPIRVABIPass() {
 void registerRiskyPasses() {
   PassRegistration<SetupSPIRVABIPass>();
   registerSanitizeTritonLinalgPass();
+  registerFinalizeSPIRVPass();
 }
 
 } // namespace risky

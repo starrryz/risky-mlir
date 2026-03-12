@@ -16,12 +16,18 @@ namespace risky {
 /// Create the --risky-setup-spirv-abi pass.
 std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>> createSetupSPIRVABIPass();
 
+/// Create the --risky-finalize-spirv pass.
+std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>> createFinalizeSPIRVPass();
+
 /// Create the --risky-sanitize-triton-linalg pass.
 std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>>
 createSanitizeTritonLinalgPass();
 
 /// Register the --risky-sanitize-triton-linalg pass.
 void registerSanitizeTritonLinalgPass();
+
+/// Register the --risky-finalize-spirv pass.
+void registerFinalizeSPIRVPass();
 
 /// Register all Risky passes.
 void registerRiskyPasses();

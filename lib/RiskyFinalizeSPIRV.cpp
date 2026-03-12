@@ -1,0 +1,171 @@
+#include "risky/Passes.h"
+
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/Pass/Pass.h"
+
+// 前置要求的头文件
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+
+// 额外需要的头文件
+#include "mlir/Dialect/SPIRV/IR/SPIRVEnums.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
+
+using namespace mlir;
+
+namespace {
+
+struct FinalizeSPIRVPass
+    : public PassWrapper<FinalizeSPIRVPass, OperationPass<ModuleOp>> {
+
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FinalizeSPIRVPass)
+
+  StringRef getArgument() const final { return "risky-finalize-spirv"; }
+
+  StringRef getDescription() const final {
+    return "Finalize SPIR-V module structure for OpenCL: hoist spirv.module "
+           "out of gpu.module, rename, set VCE triple, inject EntryPoint "
+           "and ExecutionMode";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<spirv::SPIRVDialect, gpu::GPUDialect>();
+  }
+
+  void runOnOperation() override {
+    ModuleOp moduleOp = getOperation();
+    MLIRContext *ctx = &getContext();
+
+    // ================================================================
+    // 阶段 1：剥离与提升 (Extract & Hoist)
+    //   遍历顶层 ModuleOp，找到遗留的 gpu::GPUModuleOp。
+    //   在其内部找到真正生成的 spirv::ModuleOp。
+    //   将 spirv::ModuleOp 移动到外层 ModuleOp（置于 gpu::GPUModuleOp 之前）。
+    //   然后将废弃的 gpu::GPUModuleOp erase()。
+    // ================================================================
+    spirv::ModuleOp spvModule = nullptr;
+    gpu::GPUModuleOp gpuModule = nullptr;
+
+    for (auto gpuMod : moduleOp.getOps<gpu::GPUModuleOp>()) {
+      gpuModule = gpuMod;
+      for (auto spvMod : gpuMod.getOps<spirv::ModuleOp>()) {
+        spvModule = spvMod;
+        break;
+      }
+      break;
+    }
+
+    if (!spvModule || !gpuModule) {
+      moduleOp.emitError("RiskyFinalizeSPIRV: could not find gpu.module "
+                         "containing spirv.module");
+      return signalPassFailure();
+    }
+
+    // 将 spirv.module 移动到 gpu.module 之前（外层 ModuleOp 中）
+    spvModule->moveBefore(gpuModule);
+
+    // 删除废弃的 gpu.module
+    gpuModule.erase();
+
+    // ================================================================
+    // 阶段 2：规范化命名与属性 (Rename & TargetEnv)
+    //   将 spirv::ModuleOp 重命名为 "vecadd"。
+    //   设置 vce_triple 属性满足 OpenCL 规范。
+    //   删除 gpu.kernel 空壳函数，将真正的 FuncOp 重命名为 "vecadd"。
+    // ================================================================
+
+    // 2a: 重命名 spirv.module
+    spvModule.setSymName("vecadd");
+
+    // 2b: 设置 VCE triple
+    auto vceAttr = spirv::VerCapExtAttr::get(
+        spirv::Version::V_1_0,
+        {spirv::Capability::Kernel, spirv::Capability::Addresses,
+         spirv::Capability::Int64},
+        ArrayRef<spirv::Extension>{}, ctx);
+    spvModule->setAttr(spirv::ModuleOp::getVCETripleAttrName(), vceAttr);
+
+    // 2c: 处理内部的 spirv::FuncOp
+    //     删除带有 gpu.kernel 属性的空壳函数，
+    //     保留真正包含代码的 FuncOp。
+    spirv::FuncOp realFunc = nullptr;
+    SmallVector<spirv::FuncOp> shellFuncs;
+
+    for (auto func : spvModule.getOps<spirv::FuncOp>()) {
+      if (func->hasAttr("gpu.kernel")) {
+        shellFuncs.push_back(func);
+      } else {
+        realFunc = func;
+      }
+    }
+
+    // 删除空壳函数
+    for (auto shell : shellFuncs) {
+      shell.erase();
+    }
+
+    // ================================================================
+    // 阶段 3：链接全局 ID (Link GlobalInvocationId)
+    //   寻找名为 "__builtin__GlobalInvocationId__" 的 GlobalVariableOp，
+    //   记录其 Symbol 名字。
+    // ================================================================
+    StringRef globalVarName;
+
+    for (auto globalVar : spvModule.getOps<spirv::GlobalVariableOp>()) {
+      if (globalVar.getSymName() == "__builtin__GlobalInvocationId__") {
+        globalVarName = globalVar.getSymName();
+        break;
+      }
+    }
+
+    if (globalVarName.empty()) {
+      spvModule.emitError("RiskyFinalizeSPIRV: could not find "
+                          "@__builtin__GlobalInvocationId__ global variable");
+      return signalPassFailure();
+    }
+
+    // ================================================================
+    // 阶段 4：注入入口点 (Inject EntryPoint & ExecutionMode)
+    //   在 spirv::ModuleOp 的 Block 尾部 push_back：
+    //   - spirv::EntryPointOp (Kernel, funcName, [GlobalVariable symbol])
+    //   - spirv::ExecutionModeOp (funcName, ContractionOff)
+    // ================================================================
+    Block *spvBody = spvModule.getBody();
+    OpBuilder builder(ctx);
+    builder.setInsertionPointToEnd(spvBody);
+
+    // 获取真正函数的名字用于 EntryPoint / ExecutionMode
+    StringRef funcName = realFunc ? realFunc.getSymName() : "vecadd";
+    auto globalSymRef = FlatSymbolRefAttr::get(ctx, globalVarName);
+
+    // 插入 spirv.EntryPoint "Kernel" @<funcName>, @__builtin__GlobalInvocationId__
+    builder.create<spirv::EntryPointOp>(
+        spvModule.getLoc(),
+        spirv::ExecutionModel::Kernel,
+        funcName,
+        ArrayAttr::get(ctx, {globalSymRef}));
+
+    // 插入 spirv.ExecutionMode @<funcName> "ContractionOff"
+    builder.create<spirv::ExecutionModeOp>(
+        spvModule.getLoc(),
+        funcName,
+        spirv::ExecutionMode::ContractionOff,
+        ArrayAttr::get(ctx, {}));
+  }
+};
+
+} // anonymous namespace
+
+namespace risky {
+
+std::unique_ptr<OperationPass<ModuleOp>> createFinalizeSPIRVPass() {
+  return std::make_unique<FinalizeSPIRVPass>();
+}
+
+void registerFinalizeSPIRVPass() {
+  PassRegistration<FinalizeSPIRVPass>();
+}
+
+} // namespace risky
